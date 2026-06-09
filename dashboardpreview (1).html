@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IO Benchmark Dashboard — Preview</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;height:100vh;overflow:hidden}
+
+header{
+  background:#161b22;border-bottom:1px solid #30363d;
+  padding:12px 20px;display:flex;align-items:center;gap:10px;flex-shrink:0
+}
+header h1{font-size:1.2rem;font-weight:600;flex:1}
+.badge{
+  background:#388bfd18;color:#58a6ff;border:1px solid #388bfd40;
+  padding:2px 10px;border-radius:12px;font-size:.78rem;white-space:nowrap
+}
+.badge.green{background:#3fb95018;color:#3fb950;border-color:#3fb95040}
+.badge.red{background:#f7816618;color:#f78166;border-color:#f7816640}
+.badge.yellow{background:#e3b34118;color:#e3b341;border-color:#e3b34140}
+
+.dot{
+  width:9px;height:9px;border-radius:50%;
+  background:#3fb950;box-shadow:0 0 6px #3fb950;flex-shrink:0
+}
+.dot.idle{background:#484f58;box-shadow:none}
+.dot.burst{background:#e3b341;box-shadow:0 0 6px #e3b341}
+
+.layout{
+  display:grid;grid-template-columns:290px 1fr;
+  gap:12px;padding:12px;height:calc(100vh - 53px)
+}
+
+.panel{
+  background:#161b22;border:1px solid #30363d;
+  border-radius:8px;padding:14px;overflow-y:auto
+}
+.panel h2{
+  font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;
+  color:#6e7681;margin-bottom:12px
+}
+
+.form-group{margin-bottom:12px}
+label{display:block;font-size:.82rem;color:#8b949e;margin-bottom:5px}
+select{
+  width:100%;background:#0d1117;color:#e6edf3;
+  border:1px solid #30363d;border-radius:6px;
+  padding:7px 10px;font-size:.88rem;cursor:pointer
+}
+select:focus{outline:none;border-color:#388bfd}
+input[type=range]{width:100%;accent-color:#388bfd;cursor:pointer}
+.rv{color:#58a6ff;font-weight:700}
+
+.btns{display:flex;gap:8px;margin-top:16px}
+.btn{
+  flex:1;padding:9px;border:none;border-radius:6px;
+  cursor:pointer;font-size:.88rem;font-weight:600;transition:filter .15s
+}
+.btn:hover{filter:brightness(1.2)}
+.btn-start{background:#238636;color:#fff}
+.btn-stop{background:#b62324;color:#fff}
+
+.burst-box{background:#0d1117;border-radius:6px;padding:10px;margin-top:6px}
+.burst-box.hidden{display:none}
+
+.sep{height:1px;background:#21262d;margin:14px 0}
+
+.pod-card{
+  background:#0d1117;border:1px solid #30363d;
+  border-radius:6px;padding:10px;margin-bottom:8px
+}
+.pod-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.pod-name{font-size:.82rem;font-weight:600;flex:1}
+.pod-row{
+  display:flex;justify-content:space-between;
+  font-size:.8rem;margin-bottom:3px;color:#8b949e
+}
+.pod-row span:last-child{color:#e6edf3;font-weight:500}
+.pod-phase{font-size:.72rem;color:#6e7681;margin-top:4px}
+
+.charts{display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+.chart-card{
+  background:#161b22;border:1px solid #30363d;
+  border-radius:8px;padding:14px;flex:1;min-height:0
+}
+.chart-card h3{
+  font-size:.8rem;color:#6e7681;margin-bottom:8px;
+  text-transform:uppercase;letter-spacing:.05em;
+  display:flex;align-items:center;gap:8px
+}
+.chart-card canvas{max-height:calc((100vh - 53px - 80px) / 3 - 44px)}
+
+.stat-row{display:flex;gap:6px;margin-bottom:8px}
+.stat{
+  flex:1;background:#0d1117;border:1px solid #30363d;
+  border-radius:6px;padding:6px 10px;text-align:center
+}
+.stat-val{font-size:1.1rem;font-weight:700;color:#58a6ff}
+.stat-val.green{color:#3fb950}
+.stat-val.orange{color:#e3b341}
+.stat-lbl{font-size:.7rem;color:#6e7681;margin-top:1px}
+
+.demo-banner{
+  background:#388bfd15;border:1px solid #388bfd30;
+  border-radius:6px;padding:8px 12px;
+  font-size:.78rem;color:#8b949e;margin-bottom:14px;
+  display:flex;align-items:center;gap:8px
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="dot" id="dot"></div>
+  <h1>IO Benchmark Dashboard</h1>
+  <span class="badge yellow" id="bDemo">DEMO</span>
+  <span class="badge" id="bStorage">NFS</span>
+  <span class="badge" id="bPattern">sequential</span>
+  <span class="badge" id="bBS">4k</span>
+  <span class="badge" id="bRW">R:70% W:30%</span>
+</header>
+
+<div class="layout">
+
+  <!-- Painel de controle -->
+  <div class="panel">
+    <div class="demo-banner">
+      &#9432; Preview com dados simulados. No cluster real, controla os 3 pods via API.
+    </div>
+
+    <h2>Configuracao</h2>
+
+    <div class="form-group">
+      <label>Tipo de Armazenamento</label>
+      <select id="storageType" onchange="updateBadge()">
+        <option value="NFS" selected>NFS</option>
+        <option value="iSCSI">iSCSI</option>
+        <option value="COSI">COSI (Object)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Tamanho de Bloco</label>
+      <select id="blockSize" onchange="updateBadge();restartSim()">
+        <option value="2k">2 KB</option>
+        <option value="4k" selected>4 KB</option>
+        <option value="8k">8 KB</option>
+        <option value="16k">16 KB</option>
+        <option value="32k">32 KB</option>
+        <option value="64k">64 KB</option>
+        <option value="128k">128 KB</option>
+        <option value="256k">256 KB</option>
+        <option value="512k">512 KB</option>
+        <option value="1m">1 MB</option>
+        <option value="2m">2 MB</option>
+        <option value="4m">4 MB</option>
+        <option value="8m">8 MB</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>
+        Leitura: <span class="rv" id="rv">70</span>%
+        &nbsp;/&nbsp;
+        Escrita: <span class="rv" id="wv">30</span>%
+      </label>
+      <input type="range" id="rwSlider" min="0" max="100" value="70"
+        oninput="document.getElementById('rv').textContent=this.value;
+                 document.getElementById('wv').textContent=100-this.value;
+                 updateBadge();restartSim()">
+    </div>
+
+    <div class="form-group">
+      <label>Padrao de Acesso</label>
+      <select id="pattern" onchange="toggleBurst();updateBadge();restartSim()">
+        <option value="sequential" selected>Sequencial</option>
+        <option value="random">Aleatorio</option>
+        <option value="burst">Burst</option>
+      </select>
+    </div>
+
+    <div class="burst-box hidden" id="burstBox">
+      <div class="form-group">
+        <label>Duracao Burst: <span class="rv" id="bonV">5</span>s</label>
+        <input type="range" id="burstOn" min="1" max="30" value="5"
+               oninput="document.getElementById('bonV').textContent=this.value;restartSim()">
+      </div>
+      <div class="form-group">
+        <label>Idle apos Burst: <span class="rv" id="boffV">10</span>s</label>
+        <input type="range" id="burstOff" min="1" max="60" value="10"
+               oninput="document.getElementById('boffV').textContent=this.value;restartSim()">
+      </div>
+    </div>
+
+    <div class="btns">
+      <button class="btn btn-start" onclick="simStart()">&#9654; Iniciar</button>
+      <button class="btn btn-stop"  onclick="simStop()">&#9632; Parar</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Totalizadores -->
+    <h2>Totais (3 pods)</h2>
+    <div class="stat-row">
+      <div class="stat">
+        <div class="stat-val" id="totalRiops">0</div>
+        <div class="stat-lbl">Read IOPS</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val green" id="totalWiops">0</div>
+        <div class="stat-lbl">Write IOPS</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat">
+        <div class="stat-val" id="totalRbw">0</div>
+        <div class="stat-lbl">Read MB/s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val green" id="totalWbw">0</div>
+        <div class="stat-lbl">Write MB/s</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat">
+        <div class="stat-val orange" id="avgRlat">0</div>
+        <div class="stat-lbl">Read Lat ms</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val orange" id="avgWlat">0</div>
+        <div class="stat-lbl">Write Lat ms</div>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+    <h2>Pods</h2>
+    <div id="podsArea"></div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts">
+    <div class="chart-card">
+      <h3>
+        <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#58a6ff"/></svg>
+        IOPS Total — Leitura &amp; Escrita
+      </h3>
+      <canvas id="cIops"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>
+        <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#3fb950"/></svg>
+        Largura de Banda (MB/s)
+      </h3>
+      <canvas id="cBw"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>
+        <svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#f78166"/></svg>
+        Latencia Media (ms)
+      </h3>
+      <canvas id="cLat"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Chart setup ────────────────────────────────────────────────────────────
+const N = 60;
+const emptyLabels = () => Array(N).fill('');
+const emptyData   = () => Array(N).fill(null);
+
+const mk = (lbl, clr, dash=[]) => ({
+  label: lbl,
+  borderColor: clr,
+  backgroundColor: clr + '18',
+  borderDash: dash,
+  data: emptyData(),
+  borderWidth: 2,
+  pointRadius: 0,
+  tension: .35,
+  fill: true
+});
+
+const baseOpts = (yl) => ({
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
+  plugins: {
+    legend: { labels: { color: '#6e7681', boxWidth: 10, font: { size: 11 } } },
+    tooltip: {
+      backgroundColor: '#21262d',
+      borderColor: '#30363d',
+      borderWidth: 1,
+      titleColor: '#e6edf3',
+      bodyColor: '#8b949e'
+    }
+  },
+  scales: {
+    x: {
+      ticks: { color: '#484f58', maxTicksLimit: 8, font: { size: 10 } },
+      grid:  { color: '#21262d' }
+    },
+    y: {
+      ticks: { color: '#484f58', font: { size: 10 } },
+      grid:  { color: '#21262d' },
+      title: { display: true, text: yl, color: '#6e7681', font: { size: 10 } }
+    }
+  }
+});
+
+const iopsChart = new Chart(document.getElementById('cIops'), {
+  type: 'line',
+  data: {
+    labels: emptyLabels(),
+    datasets: [mk('Read IOPS', '#58a6ff'), mk('Write IOPS', '#3fb950', [4,2])]
+  },
+  options: baseOpts('IOPS')
+});
+
+const bwChart = new Chart(document.getElementById('cBw'), {
+  type: 'line',
+  data: {
+    labels: emptyLabels(),
+    datasets: [mk('Read MB/s', '#58a6ff'), mk('Write MB/s', '#3fb950', [4,2])]
+  },
+  options: baseOpts('MB/s')
+});
+
+const latChart = new Chart(document.getElementById('cLat'), {
+  type: 'line',
+  data: {
+    labels: emptyLabels(),
+    datasets: [mk('Read Lat ms', '#f78166'), mk('Write Lat ms', '#e3b341', [4,2])]
+  },
+  options: baseOpts('ms')
+});
+
+function pushChart(ch, ...vals) {
+  const ts = new Date().toLocaleTimeString('pt-BR', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  vals.forEach((v, i) => {
+    ch.data.datasets[i].data.push(v);
+    if (ch.data.datasets[i].data.length > N) ch.data.datasets[i].data.shift();
+  });
+  ch.data.labels.push(ts);
+  if (ch.data.labels.length > N) ch.data.labels.shift();
+  ch.update('none');
+}
+
+// ── Simulacao ──────────────────────────────────────────────────────────────
+const BLOCK_IOPS = {
+  '2k': [3800,4200], '4k': [3000,3600], '8k': [2200,2800],
+  '16k': [1600,2000],'32k': [1100,1400],'64k': [700,900],
+  '128k': [400,550], '256k': [220,300], '512k': [110,160],
+  '1m': [55,80],     '2m': [28,40],    '4m': [14,20],    '8m': [7,11]
+};
+const BLOCK_BW = {  // MB/s
+  '2k': [8,12],   '4k': [12,18],  '8k': [18,28],  '16k': [28,42],
+  '32k': [42,58], '64k': [58,80], '128k': [70,110],'256k': [80,120],
+  '512k': [90,130],'1m': [100,150],'2m': [110,160], '4m': [115,165],'8m': [120,170]
+};
+const BLOCK_LAT = {
+  '2k': [0.2,0.6], '4k': [0.3,0.8],  '8k': [0.5,1.2],  '16k': [0.8,1.8],
+  '32k': [1.2,2.5],'64k': [2.0,4.0], '128k': [3.0,6.0], '256k': [5.0,9.0],
+  '512k': [8,15],  '1m': [14,25],    '2m': [25,45],      '4m': [45,80], '8m': [80,150]
+};
+
+const PODS = ['io-generator-0', 'io-generator-1', 'io-generator-2'];
+let running = false;
+let simInterval = null;
+let burstPhase = 'burst';
+let burstTick = 0;
+
+function rnd(min, max) { return min + Math.random() * (max - min); }
+function noise(v, pct=0.12) { return v * (1 + (Math.random()-0.5)*pct*2); }
+
+function getParams() {
+  const bs = document.getElementById('blockSize').value;
+  const rp = parseInt(document.getElementById('rwSlider').value) / 100;
+  const wp = 1 - rp;
+  const pat = document.getElementById('pattern').value;
+  const burstOn  = parseInt(document.getElementById('burstOn').value);
+  const burstOff = parseInt(document.getElementById('burstOff').value);
+  return { bs, rp, wp, pat, burstOn, burstOff };
+}
+
+function computePodMetrics(podIdx, p) {
+  const [ioMin, ioMax] = BLOCK_IOPS[p.bs] || [1000, 2000];
+  const [bwMin, bwMax] = BLOCK_BW[p.bs]   || [50, 100];
+  const [ltMin, ltMax] = BLOCK_LAT[p.bs]  || [1, 5];
+
+  // Variacao por pod (+/- 15%)
+  const podFactor = 1 + (podIdx - 1) * 0.08;
+
+  let scale = 1;
+  let phase = 'active';
+
+  if (p.pat === 'burst') {
+    phase = burstPhase;
+    scale = burstPhase === 'burst' ? 1.8 : 0.02;
+  } else if (p.pat === 'random') {
+    scale = 0.6; // random e mais lento
+  }
+
+  const totalIops = noise(rnd(ioMin, ioMax) * podFactor * scale);
+  const totalBw   = noise(rnd(bwMin, bwMax) * podFactor * scale);
+  const lat       = noise(rnd(ltMin, ltMax) * podFactor / Math.max(scale, 0.3));
+
+  return {
+    pod: PODS[podIdx],
+    running: running,
+    phase: phase,
+    read_iops:    totalIops * p.rp,
+    write_iops:   totalIops * p.wp,
+    read_bw_mb:   totalBw  * p.rp,
+    write_bw_mb:  totalBw  * p.wp,
+    read_lat_ms:  lat,
+    write_lat_ms: lat * (1 + p.wp * 0.3),
+  };
+}
+
+function simTick() {
+  const p = getParams();
+  burstTick++;
+
+  // Gerencia fase burst
+  if (p.pat === 'burst') {
+    if (burstPhase === 'burst' && burstTick >= p.burstOn) {
+      burstPhase = 'idle'; burstTick = 0;
+    } else if (burstPhase === 'idle' && burstTick >= p.burstOff) {
+      burstPhase = 'burst'; burstTick = 0;
+    }
+  }
+
+  const metrics = PODS.map((_, i) => computePodMetrics(i, p));
+
+  // Totais
+  const ri = metrics.reduce((s,m) => s + m.read_iops,   0);
+  const wi = metrics.reduce((s,m) => s + m.write_iops,  0);
+  const rb = metrics.reduce((s,m) => s + m.read_bw_mb,  0);
+  const wb = metrics.reduce((s,m) => s + m.write_bw_mb, 0);
+  const rl = metrics.reduce((s,m) => s + m.read_lat_ms, 0) / 3;
+  const wl = metrics.reduce((s,m) => s + m.write_lat_ms,0) / 3;
+
+  pushChart(iopsChart, ri, wi);
+  pushChart(bwChart,   rb, wb);
+  pushChart(latChart,  rl, wl);
+
+  // Totalizadores
+  document.getElementById('totalRiops').textContent = ri.toFixed(0);
+  document.getElementById('totalWiops').textContent = wi.toFixed(0);
+  document.getElementById('totalRbw').textContent   = rb.toFixed(1);
+  document.getElementById('totalWbw').textContent   = wb.toFixed(1);
+  document.getElementById('avgRlat').textContent    = rl.toFixed(2);
+  document.getElementById('avgWlat').textContent    = wl.toFixed(2);
+
+  // Pod cards
+  renderPods(metrics);
+}
+
+function renderPods(metrics) {
+  const area = document.getElementById('podsArea');
+  metrics.forEach((m, i) => {
+    let card = document.getElementById('pod-' + i);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'pod-card';
+      card.id = 'pod-' + i;
+      area.appendChild(card);
+    }
+    const dotCls = !running ? 'idle' : m.phase === 'burst' ? '' : m.phase === 'idle' ? 'burst' : '';
+    const badgeCls = !running ? 'red' : m.phase === 'idle' ? 'yellow' : 'green';
+    const badgeTxt = !running ? 'parado' : m.phase === 'idle' ? 'idle' : 'ativo';
+    card.innerHTML = `
+      <div class="pod-header">
+        <div class="dot ${dotCls}"></div>
+        <span class="pod-name">${m.pod}</span>
+        <span class="badge ${badgeCls}">${badgeTxt}</span>
+      </div>
+      <div class="pod-row"><span>Read IOPS</span><span>${m.read_iops.toFixed(0)}</span></div>
+      <div class="pod-row"><span>Write IOPS</span><span>${m.write_iops.toFixed(0)}</span></div>
+      <div class="pod-row"><span>Read BW</span><span>${m.read_bw_mb.toFixed(1)} MB/s</span></div>
+      <div class="pod-row"><span>Write BW</span><span>${m.write_bw_mb.toFixed(1)} MB/s</span></div>
+      <div class="pod-row"><span>Read Lat</span><span>${m.read_lat_ms.toFixed(2)} ms</span></div>
+      <div class="pod-row"><span>Write Lat</span><span>${m.write_lat_ms.toFixed(2)} ms</span></div>
+      <div class="pod-phase">
+        worker-${i+1} &nbsp;|&nbsp; ${document.getElementById('blockSize').value}
+        &nbsp;|&nbsp; ${document.getElementById('pattern').value}
+      </div>
+    `;
+  });
+}
+
+function simStart() {
+  running = true;
+  burstPhase = 'burst';
+  burstTick = 0;
+  document.getElementById('dot').classList.remove('idle');
+  updateBadge();
+  if (simInterval) clearInterval(simInterval);
+  simInterval = setInterval(simTick, 1000);
+  simTick();
+}
+
+function simStop() {
+  running = false;
+  document.getElementById('dot').classList.add('idle');
+  if (simInterval) { clearInterval(simInterval); simInterval = null; }
+  document.getElementById('totalRiops').textContent = '0';
+  document.getElementById('totalWiops').textContent = '0';
+  document.getElementById('totalRbw').textContent   = '0';
+  document.getElementById('totalWbw').textContent   = '0';
+  document.getElementById('avgRlat').textContent    = '0';
+  document.getElementById('avgWlat').textContent    = '0';
+  renderPods(PODS.map((p,i) => ({
+    pod:p, running:false, phase:'idle',
+    read_iops:0, write_iops:0, read_bw_mb:0,
+    write_bw_mb:0, read_lat_ms:0, write_lat_ms:0
+  })));
+}
+
+function restartSim() {
+  if (running) { simStop(); simStart(); }
+}
+
+function toggleBurst() {
+  document.getElementById('burstBox').classList.toggle(
+    'hidden', document.getElementById('pattern').value !== 'burst'
+  );
+}
+
+function updateBadge() {
+  const bs  = document.getElementById('blockSize').value;
+  const rp  = document.getElementById('rwSlider').value;
+  const pat = document.getElementById('pattern').value;
+  const st  = document.getElementById('storageType').value;
+  document.getElementById('bStorage').textContent = st;
+  document.getElementById('bPattern').textContent = pat;
+  document.getElementById('bBS').textContent = bs;
+  document.getElementById('bRW').textContent = `R:${rp}% W:${100-rp}%`;
+}
+
+// Inicia automaticamente com dados de exemplo
+simStart();
+</script>
+</body>
+</html>
