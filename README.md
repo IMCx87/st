@@ -2,7 +2,7 @@
 
 Plataforma de geração de IO sintético para Kubernetes com dashboard web em tempo real.
 
-Deploy de **3 pods geradores de IO** distribuídos em workers diferentes + **1 dashboard** que agrega e exibe métricas ao vivo — tudo em um único arquivo YAML autocontido.
+Deploy de **3 pods geradores de IO** distribuídos em workers diferentes + **1 dashboard** que agrega e exibe métricas ao vivo, tudo em um único arquivo YAML autocontido.
 
 ---
 
