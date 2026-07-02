@@ -1,0 +1,154 @@
+# ==============================================================
+# STATEFULSET — io-generator (Nutanix Kubernetes Platform)
+# ==============================================================
+# 3 pods geradores de IO, distribuídos em workers diferentes via
+# podAntiAffinity obrigatória (topologyKey: kubernetes.io/hostname).
+# Cada pod recebe seu próprio PVC de 50Gi via volumeClaimTemplates,
+# provisionado pelo Nutanix CSI Driver (Nutanix Files).
+# ==============================================================
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: io-generator
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-generator
+spec:
+  replicas: 3
+  serviceName: io-generator-headless   # deve coincidir com o headless Service em service.yaml
+  podManagementPolicy: Parallel        # inicia/remove todos os pods simultaneamente
+  updateStrategy:
+    type: RollingUpdate                # atualiza 1 pod por vez, em ordem decrescente (2,1,0)
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: io-generator
+  template:
+    metadata:
+      labels:
+        app: io-generator
+        app.kubernetes.io/component: io-generator
+        app.kubernetes.io/part-of: io-benchmark
+    spec:
+      # ── Garante 1 pod por node — obrigatório, não agendará se não houver 3 nodes ──
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: io-generator
+              topologyKey: kubernetes.io/hostname
+      # ──────────────────────────────────────────────────────────────────────────────
+      terminationGracePeriodSeconds: 30   # tempo para o worker de IO encerrar limpo
+      containers:
+        - name: io-generator
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent   # tag específica → não força pull a cada restart
+          command: ["/bin/sh", "-c"]
+          args:
+            - pip install flask boto3 --quiet --no-cache-dir && python /app/app.py
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Nome do pod injetado via Downward API — usado no path do arquivo de teste
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Diretório de dados montado pelo PVC
+            - name: DATA_DIR
+              value: "/data"
+            # Tamanho do arquivo de teste em GB (deve caber no PVC de 50Gi)
+            - name: TEST_FILE_SIZE_GB
+              value: "10"
+            # "file" para Nutanix Files/Volumes  |  "s3" para Nutanix Objects — veja seção abaixo
+            - name: STORAGE_TYPE
+              value: "file"
+
+            # ── Nutanix Objects (S3): descomente as 4 vars abaixo e mude STORAGE_TYPE para "s3" ──
+            # Requer: secret.yaml preenchido com valores reais do bucket
+            #
+            # - name: STORAGE_TYPE
+            #   value: "s3"
+            # - name: AWS_ENDPOINT_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: io-s3-credentials
+            #       key: AWS_ENDPOINT_URL
+            # - name: BUCKET_NAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: io-s3-credentials
+            #       key: BUCKET_NAME
+            # - name: AWS_ACCESS_KEY_ID
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: io-s3-credentials
+            #       key: AWS_ACCESS_KEY_ID
+            # - name: AWS_SECRET_ACCESS_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: io-s3-credentials
+            #       key: AWS_SECRET_ACCESS_KEY
+            # ────────────────────────────────────────────────────────────────────────
+
+          volumeMounts:
+            - name: io-data
+              mountPath: /data        # PVC: arquivos de teste ficam aqui
+            - name: app-code
+              mountPath: /app
+              readOnly: true          # ConfigMap é só leitura
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"            # workload de IO é intensivo em CPU
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30   # pip install + criação do arquivo de 10GB pode demorar
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60   # mais conservador que readiness
+            periodSeconds: 30
+            failureThreshold: 5       # 5 × 30s = 2.5 min antes de reiniciar
+            timeoutSeconds: 5
+      volumes:
+        - name: app-code
+          configMap:
+            name: io-generator-app
+            defaultMode: 0444         # somente leitura
+
+  # ── Um PVC por pod, criado automaticamente pelo StatefulSet ──────────────────
+  # Nomes: io-data-io-generator-{0,1,2}
+  # Provisionado via Nutanix CSI Driver (storageclass.yaml)
+  # Para mudar para Nutanix Volumes (iSCSI): troque storageClassName por nutanix-volumes
+  # ─────────────────────────────────────────────────────────────────────────────
+  volumeClaimTemplates:
+    - metadata:
+        name: io-data
+        labels:
+          app: iobenchmark
+          managed-by: claude-code
+          component: io-generator
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: nutanix-files     # Nutanix Files (padrão) — veja storageclass.yaml
+        # storageClassName: nutanix-volumes # Nutanix Volumes (iSCSI) — descomente para usar
+        resources:
+          requests:
+            storage: 50Gi

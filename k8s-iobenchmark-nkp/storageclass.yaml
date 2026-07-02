@@ -1,0 +1,79 @@
+# ==============================================================
+# STORAGECLASSES — Nutanix Kubernetes Platform (NKP)
+# ==============================================================
+# Usa o Nutanix CSI Driver (provisioner: csi.nutanix.com), instalado
+# automaticamente pelo NKP/Kommander via addon "Nutanix CSI Storage".
+#
+# Pré-requisitos:
+#   - Nutanix CSI Driver instalado no cluster (addon Kommander ou manual)
+#   - Secret com credenciais do Prism Element/Central já criado pelo
+#     instalador do CSI (normalmente "nutanix-csi-credentials" no
+#     namespace "ntnx-system" — confirme com: kubectl get secret -n ntnx-system)
+#
+# Escolha UMA opção editando statefulset.yaml > volumeClaimTemplates
+# > storageClassName: nutanix-files    (padrão — Nutanix Files/NFS)
+# > storageClassName: nutanix-volumes  (alternativa — Nutanix Volumes/iSCSI)
+# ==============================================================
+
+---
+# OPÇÃO ATIVA: Nutanix Files (compartilhamento via NFS gerenciado pelo Prism)
+# Suporta ReadWriteMany — permite até PVC compartilhado entre pods, se necessário
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nutanix-files
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+  annotations:
+    io-benchmark/type: nutanix-files
+provisioner: csi.nutanix.com
+parameters:
+  csi.storage.k8s.io/fstype: nfs
+  storageType: NutanixFiles
+  dynamicFileSystemExport: "true"      # cria o export automaticamente no File Server abaixo
+  nfsServerName: "<FILE-SERVER-NAME>"  # <- EDITE: nome do File Server no Prism (Files Console)
+  # exportPath: "/io-benchmark"        # opcional: path fixo do export (senão gerado automaticamente)
+  csi.storage.k8s.io/provisioner-secret-name: nutanix-csi-credentials
+  csi.storage.k8s.io/provisioner-secret-namespace: ntnx-system
+  csi.storage.k8s.io/controller-expand-secret-name: nutanix-csi-credentials
+  csi.storage.k8s.io/controller-expand-secret-namespace: ntnx-system
+reclaimPolicy: Delete            # PVCs são deletados junto com o PV
+volumeBindingMode: Immediate     # provisiona imediatamente ao criar o PVC
+allowVolumeExpansion: true
+
+---
+# OPÇÃO ALTERNATIVA: Nutanix Volumes (bloco via iSCSI gerenciado pelo Prism)
+# Equivalente ao modo iSCSI genérico — descomente para usar no lugar do Files
+# apiVersion: storage.k8s.io/v1
+# kind: StorageClass
+# metadata:
+#   name: nutanix-volumes
+#   labels:
+#     app: iobenchmark
+#     managed-by: claude-code
+#   annotations:
+#     io-benchmark/type: nutanix-volumes
+# provisioner: csi.nutanix.com
+# parameters:
+#   csi.storage.k8s.io/fstype: ext4
+#   storageType: NutanixVolumes
+#   storageContainer: "<STORAGE-CONTAINER-NAME>"   # <- EDITE: container no Prism (Storage Console)
+#   chapAuth: "false"                              # "true" se CHAP estiver habilitado no cluster iSCSI
+#   csi.storage.k8s.io/provisioner-secret-name: nutanix-csi-credentials
+#   csi.storage.k8s.io/provisioner-secret-namespace: ntnx-system
+#   csi.storage.k8s.io/controller-expand-secret-name: nutanix-csi-credentials
+#   csi.storage.k8s.io/controller-expand-secret-namespace: ntnx-system
+# reclaimPolicy: Delete
+# volumeBindingMode: Immediate
+# allowVolumeExpansion: true
+
+---
+# OPÇÃO OBJETO: Nutanix Objects (S3-compatible) — não usa StorageClass/PVC.
+# Para usar, NÃO aplique este arquivo para os pods; em vez disso:
+#   1. Crie um bucket no Nutanix Objects (Prism Central > Objects)
+#   2. Gere Access Key / Secret Key para o bucket
+#   3. Preencha k8s-iobenchmark-nkp/secret.yaml com o endpoint S3 do Objects
+#   4. No statefulset.yaml, descomente STORAGE_TYPE: "s3" e as env vars S3
+# O io-generator já tem um worker S3 nativo (boto3) — nenhuma mudança de
+# código é necessária, apenas configuração.

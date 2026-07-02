@@ -1,0 +1,556 @@
+# ==============================================================
+# CONFIGMAPS — Código da aplicação (não-sensível, plataforma agnóstica)
+# ==============================================================
+# Vars sensíveis (S3/Nutanix Objects) estão em secret.yaml
+# ==============================================================
+
+---
+# ConfigMap: io-generator — Python Flask REST API (porta 8080)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: io-generator-app
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-generator
+data:
+  app.py: |
+    #!/usr/bin/env python3
+    """Synthetic IO Generator — REST API"""
+    import os, time, random, threading, socket
+    from collections import deque
+    from flask import Flask, request, jsonify
+
+    app = Flask(__name__)
+
+    POD_NAME     = os.environ.get("POD_NAME", socket.gethostname())
+    STORAGE_TYPE = os.environ.get("STORAGE_TYPE", "file")   # file | s3
+    DATA_DIR     = os.environ.get("DATA_DIR", "/data")
+    FILE_SIZE_GB = int(os.environ.get("TEST_FILE_SIZE_GB", "10"))
+    TEST_FILE    = os.path.join(DATA_DIR, "iotest.bin")
+
+    S3_ENDPOINT = os.environ.get("AWS_ENDPOINT_URL",      "http://localhost:9000")
+    S3_BUCKET   = os.environ.get("BUCKET_NAME",           "io-benchmark")
+    S3_ACCESS   = os.environ.get("AWS_ACCESS_KEY_ID",     "")
+    S3_SECRET   = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+
+    BLOCK_SIZES = {
+        "2k":  2<<10,  "4k":   4<<10,  "8k":   8<<10,  "16k": 16<<10,
+        "32k": 32<<10, "64k":  64<<10, "128k": 128<<10, "256k":256<<10,
+        "512k":512<<10,"1m":   1<<20,  "2m":   2<<20,   "4m":  4<<20,
+        "8m":  8<<20,
+    }
+
+    _state = {
+        "running": False, "config": {}, "error": None,
+        "metrics": {
+            "pod": POD_NAME, "read_iops": 0, "write_iops": 0,
+            "read_bw_mb": 0, "write_bw_mb": 0,
+            "read_lat_ms": 0, "write_lat_ms": 0, "timestamp": 0,
+        },
+    }
+    _history = deque(maxlen=120)
+    _lock    = threading.Lock()
+    _worker  = None
+
+
+    def _prepare_file(size, bs):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if not os.path.exists(TEST_FILE) or os.path.getsize(TEST_FILE) < size:
+            print(f"[io-gen] criando arquivo de teste {size>>30} GB...", flush=True)
+            buf = os.urandom(min(bs, 1 << 20))
+            written = 0
+            with open(TEST_FILE, "wb") as f:
+                while written < size:
+                    n = min(len(buf), size - written)
+                    f.write(buf[:n])
+                    written += n
+            print("[io-gen] arquivo pronto.", flush=True)
+
+
+    def _report(r_ops, w_ops, r_by, w_by, r_lat, w_lat, elapsed, cfg, phase):
+        m = {
+            "pod": POD_NAME, "timestamp": time.time(),
+            "read_iops":    r_ops / elapsed,
+            "write_iops":   w_ops / elapsed,
+            "read_bw_mb":   r_by  / elapsed / (1 << 20),
+            "write_bw_mb":  w_by  / elapsed / (1 << 20),
+            "read_lat_ms":  r_lat / max(r_ops, 1),
+            "write_lat_ms": w_lat / max(w_ops, 1),
+            "pattern": cfg["pattern"], "block_size": cfg["block_size"], "phase": phase,
+        }
+        with _lock:
+            _state["metrics"] = m
+            _history.append(dict(m))
+
+
+    def _file_worker(cfg):
+        bs        = cfg["block_size"]
+        read_pct  = cfg["read_pct"]
+        pattern   = cfg["pattern"]
+        burst_on  = cfg.get("burst_on",  5)
+        burst_off = cfg.get("burst_off", 10)
+
+        file_size = FILE_SIZE_GB << 30
+        try:
+            _prepare_file(file_size, bs)
+        except Exception as e:
+            with _lock: _state["error"] = str(e)
+            return
+
+        num_blocks = file_size // bs
+        wbuf = os.urandom(bs)
+        fd_r = open(TEST_FILE, "rb")
+        fd_w = open(TEST_FILE, "r+b")
+
+        r_ops = w_ops = r_by = w_by = r_lat = w_lat = 0.0
+        seq = 0
+        t0  = time.monotonic()
+        phase_t  = t0
+        in_burst = True
+
+        try:
+            while _state["running"]:
+                now = time.monotonic()
+
+                if pattern == "burst":
+                    ep = now - phase_t
+                    if     in_burst and ep >= burst_on:  in_burst = False; phase_t = now
+                    elif not in_burst and ep >= burst_off: in_burst = True; phase_t = now
+                    if not in_burst:
+                        time.sleep(0.02)
+                        if now - t0 >= 1.0:
+                            _report(r_ops,w_ops,r_by,w_by,r_lat,w_lat,now-t0,cfg,"idle")
+                            r_ops=w_ops=r_by=w_by=r_lat=w_lat=0.0; t0=now
+                        continue
+
+                blk = seq % num_blocks if pattern == "sequential" else random.randrange(num_blocks)
+                seq += 1
+                off  = blk * bs
+                is_r = random.randint(1, 100) <= read_pct
+
+                if is_r:
+                    ts = time.perf_counter()
+                    fd_r.seek(off); fd_r.read(bs)
+                    r_ops += 1; r_by += bs; r_lat += (time.perf_counter() - ts) * 1000
+                else:
+                    ts = time.perf_counter()
+                    fd_w.seek(off); fd_w.write(wbuf)
+                    w_ops += 1; w_by += bs; w_lat += (time.perf_counter() - ts) * 1000
+
+                if now - t0 >= 1.0:
+                    ph = "burst" if pattern == "burst" else "active"
+                    _report(r_ops,w_ops,r_by,w_by,r_lat,w_lat,now-t0,cfg,ph)
+                    r_ops=w_ops=r_by=w_by=r_lat=w_lat=0.0; t0=now
+        finally:
+            fd_r.close(); fd_w.close()
+
+
+    def _s3_worker(cfg):
+        import boto3
+        from botocore.config import Config as BC
+        bs        = cfg["block_size"]
+        read_pct  = cfg["read_pct"]
+        pattern   = cfg["pattern"]
+        burst_on  = cfg.get("burst_on",  5)
+        burst_off = cfg.get("burst_off", 10)
+
+        try:
+            s3 = boto3.client(
+                "s3", endpoint_url=S3_ENDPOINT,
+                aws_access_key_id=S3_ACCESS, aws_secret_access_key=S3_SECRET,
+                config=BC(signature_version="s3v4"), region_name="us-east-1",
+            )
+            try: s3.head_bucket(Bucket=S3_BUCKET)
+            except: s3.create_bucket(Bucket=S3_BUCKET)
+        except Exception as e:
+            with _lock: _state["error"] = f"S3 init: {e}"
+            return
+
+        N    = 200
+        keys = [f"bench/{POD_NAME}/obj_{i:06d}" for i in range(N)]
+        wbuf = os.urandom(bs)
+        for k in keys[:20]:
+            try: s3.put_object(Bucket=S3_BUCKET, Key=k, Body=wbuf)
+            except: pass
+
+        r_ops=w_ops=r_by=w_by=r_lat=w_lat=0.0
+        ctr=0; t0=time.monotonic(); phase_t=t0; in_burst=True
+
+        while _state["running"]:
+            now = time.monotonic()
+            if pattern == "burst":
+                ep = now - phase_t
+                if     in_burst and ep >= burst_on:  in_burst=False; phase_t=now
+                elif not in_burst and ep >= burst_off: in_burst=True; phase_t=now
+                if not in_burst: time.sleep(0.05); continue
+
+            idx  = random.randrange(N) if pattern != "sequential" else ctr % N
+            ctr += 1
+            is_r = random.randint(1, 100) <= read_pct
+            try:
+                if is_r:
+                    ts = time.perf_counter()
+                    s3.get_object(Bucket=S3_BUCKET, Key=keys[idx])["Body"].read()
+                    r_ops+=1; r_by+=bs; r_lat+=(time.perf_counter()-ts)*1000
+                else:
+                    k = f"bench/{POD_NAME}/obj_{ctr%N:06d}"
+                    ts = time.perf_counter()
+                    s3.put_object(Bucket=S3_BUCKET, Key=k, Body=wbuf)
+                    w_ops+=1; w_by+=bs; w_lat+=(time.perf_counter()-ts)*1000
+            except: time.sleep(0.1); continue
+
+            if now - t0 >= 1.0:
+                _report(r_ops,w_ops,r_by,w_by,r_lat,w_lat,now-t0,cfg,"active")
+                r_ops=w_ops=r_by=w_by=r_lat=w_lat=0.0; t0=now
+
+
+    @app.route("/start", methods=["POST"])
+    def start():
+        global _worker
+        d   = request.get_json(force=True, silent=True) or {}
+        bs  = BLOCK_SIZES.get(str(d.get("block_size", "4k")).lower(), 4096)
+        cfg = {
+            "block_size": bs,
+            "read_pct":   int(d.get("read_pct",  50)),
+            "pattern":    d.get("pattern", "sequential"),
+            "burst_on":   int(d.get("burst_on",  5)),
+            "burst_off":  int(d.get("burst_off", 10)),
+        }
+        if _state["running"]:
+            _state["running"] = False
+            if _worker: _worker.join(timeout=5)
+        _state.update({"running": True, "config": cfg, "error": None})
+        fn = _s3_worker if STORAGE_TYPE == "s3" else _file_worker
+        _worker = threading.Thread(target=fn, args=(cfg,), daemon=True)
+        _worker.start()
+        return jsonify({"status": "started", "config": cfg, "storage": STORAGE_TYPE})
+
+
+    @app.route("/stop", methods=["POST"])
+    def stop():
+        _state["running"] = False
+        return jsonify({"status": "stopped"})
+
+
+    @app.route("/metrics")
+    def metrics():
+        with _lock:
+            return jsonify({
+                "pod": POD_NAME, "running": _state["running"],
+                "storage_type": STORAGE_TYPE, "config": _state["config"],
+                "metrics": _state["metrics"], "history": list(_history),
+                "error": _state["error"],
+            })
+
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok", "pod": POD_NAME})
+
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080, threaded=True)
+
+---
+# ConfigMap: io-dashboard — Python Flask UI + API (porta 3000)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: io-dashboard-app
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-dashboard
+data:
+  app.py: |
+    #!/usr/bin/env python3
+    """IO Benchmark Dashboard - coleta metricas dos geradores e serve UI web."""
+    import os, time, threading, json
+    from collections import deque
+    import urllib.request, urllib.error
+    from flask import Flask, jsonify, request, Response
+
+    app = Flask(__name__)
+
+    NAMESPACE   = os.environ.get("NAMESPACE",    "io-benchmark")
+    NUM_PODS    = int(os.environ.get("NUM_PODS", "3"))
+    SVC_NAME    = os.environ.get("IO_SERVICE",   "io-generator-headless")
+    STS_NAME    = os.environ.get("IO_STS",       "io-generator")
+
+    def pod_endpoints():
+        return [
+            f"http://{STS_NAME}-{i}.{SVC_NAME}.{NAMESPACE}.svc.cluster.local:8080"
+            for i in range(NUM_PODS)
+        ]
+
+    _store = {}
+    _lock  = threading.Lock()
+
+    def _fetch_loop():
+        while True:
+            for ep in pod_endpoints():
+                try:
+                    with urllib.request.urlopen(f"{ep}/metrics", timeout=2) as r:
+                        data = json.loads(r.read())
+                        with _lock: _store[ep] = data
+                except Exception as e:
+                    pod_id = ep.split("/")[2].split(".")[0]
+                    with _lock: _store[ep] = {"pod": pod_id, "error": str(e),
+                                               "running": False, "metrics": {}}
+            time.sleep(1)
+
+    threading.Thread(target=_fetch_loop, daemon=True).start()
+
+
+    DASHBOARD_HTML = """<!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>IO Benchmark Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;height:100vh;overflow:hidden}
+    header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+    header h1{font-size:1.2rem;font-weight:600;flex:1}
+    .badge{background:#388bfd18;color:#58a6ff;border:1px solid #388bfd40;padding:2px 10px;border-radius:12px;font-size:.78rem;white-space:nowrap}
+    .badge.green{background:#3fb95018;color:#3fb950;border-color:#3fb95040}
+    .badge.red{background:#f7816618;color:#f78166;border-color:#f7816640}
+    .dot{width:9px;height:9px;border-radius:50%;background:#3fb950;box-shadow:0 0 6px #3fb950;flex-shrink:0}
+    .dot.idle{background:#484f58;box-shadow:none}
+    .layout{display:grid;grid-template-columns:290px 1fr;gap:12px;padding:12px;height:calc(100vh - 53px)}
+    .panel{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;overflow-y:auto}
+    .panel h2{font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:#6e7681;margin-bottom:12px}
+    .form-group{margin-bottom:12px}
+    label{display:block;font-size:.82rem;color:#8b949e;margin-bottom:5px}
+    select{width:100%;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 10px;font-size:.88rem;cursor:pointer}
+    select:focus{outline:none;border-color:#388bfd}
+    input[type=range]{width:100%;accent-color:#388bfd;cursor:pointer}
+    .rv{color:#58a6ff;font-weight:700}
+    .btns{display:flex;gap:8px;margin-top:16px}
+    .btn{flex:1;padding:9px;border:none;border-radius:6px;cursor:pointer;font-size:.88rem;font-weight:600;transition:filter .15s}
+    .btn:hover{filter:brightness(1.15)}
+    .btn-start{background:#238636;color:#fff}
+    .btn-stop{background:#b62324;color:#fff}
+    .burst-box{background:#0d1117;border-radius:6px;padding:10px;margin-top:6px}
+    .burst-box.hidden{display:none}
+    .sep{height:1px;background:#21262d;margin:14px 0}
+    .pod-card{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;margin-bottom:8px}
+    .pod-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+    .pod-name{font-size:.82rem;font-weight:600;flex:1}
+    .pod-row{display:flex;justify-content:space-between;font-size:.8rem;margin-bottom:3px;color:#8b949e}
+    .pod-row span:last-child{color:#e6edf3;font-weight:500}
+    .pod-err{color:#f78166;font-size:.75rem;margin-top:4px;word-break:break-all}
+    .charts{display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+    .chart-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;flex:1;min-height:0}
+    .chart-card h3{font-size:.8rem;color:#6e7681;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em}
+    .chart-card canvas{max-height:calc((100vh - 53px - 80px) / 3 - 40px)}
+    </style>
+    </head>
+    <body>
+    <header>
+      <div class="dot idle" id="dot"></div>
+      <h1>IO Benchmark Dashboard</h1>
+      <span class="badge" id="bStorage">--</span>
+      <span class="badge" id="bPattern">--</span>
+      <span class="badge" id="bBS">--</span>
+      <span class="badge" id="bRW">--</span>
+    </header>
+    <div class="layout">
+      <div class="panel">
+        <h2>Configuracao</h2>
+        <div class="form-group">
+          <label>Tipo de Armazenamento</label>
+          <select id="storageType">
+            <option value="nfs">NFS</option>
+            <option value="iscsi">iSCSI</option>
+            <option value="cosi">COSI (Object)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Tamanho de Bloco</label>
+          <select id="blockSize">
+            <option value="2k">2 KB</option>
+            <option value="4k" selected>4 KB</option>
+            <option value="8k">8 KB</option>
+            <option value="16k">16 KB</option>
+            <option value="32k">32 KB</option>
+            <option value="64k">64 KB</option>
+            <option value="128k">128 KB</option>
+            <option value="256k">256 KB</option>
+            <option value="512k">512 KB</option>
+            <option value="1m">1 MB</option>
+            <option value="2m">2 MB</option>
+            <option value="4m">4 MB</option>
+            <option value="8m">8 MB</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Leitura: <span class="rv" id="rv">50</span>% &nbsp;/&nbsp; Escrita: <span class="rv" id="wv">50</span>%</label>
+          <input type="range" id="rwSlider" min="0" max="100" value="50"
+                 oninput="document.getElementById('rv').textContent=this.value;document.getElementById('wv').textContent=100-this.value">
+        </div>
+        <div class="form-group">
+          <label>Padrao de Acesso</label>
+          <select id="pattern" onchange="toggleBurst()">
+            <option value="sequential">Sequencial</option>
+            <option value="random">Aleatorio</option>
+            <option value="burst">Burst</option>
+          </select>
+        </div>
+        <div class="burst-box hidden" id="burstBox">
+          <div class="form-group">
+            <label>Duracao Burst: <span class="rv" id="bonV">5</span>s</label>
+            <input type="range" id="burstOn" min="1" max="30" value="5"
+                   oninput="document.getElementById('bonV').textContent=this.value">
+          </div>
+          <div class="form-group">
+            <label>Idle apos Burst: <span class="rv" id="boffV">10</span>s</label>
+            <input type="range" id="burstOff" min="1" max="60" value="10"
+                   oninput="document.getElementById('boffV').textContent=this.value">
+          </div>
+        </div>
+        <div class="btns">
+          <button class="btn btn-start" onclick="startIO()">&#9654; Iniciar</button>
+          <button class="btn btn-stop"  onclick="stopIO()">&#9632; Parar</button>
+        </div>
+        <div class="sep"></div>
+        <h2>Pods</h2>
+        <div id="podsArea"></div>
+      </div>
+      <div class="charts">
+        <div class="chart-card"><h3>IOPS Total (Leitura + Escrita)</h3><canvas id="cIops"></canvas></div>
+        <div class="chart-card"><h3>Largura de Banda MB/s</h3><canvas id="cBw"></canvas></div>
+        <div class="chart-card"><h3>Latencia Media (ms)</h3><canvas id="cLat"></canvas></div>
+      </div>
+    </div>
+    <script>
+    const N=60,TS=Array(N).fill('');
+    const mk=(lbl,clr)=>({label:lbl,borderColor:clr,backgroundColor:clr+'22',data:Array(N).fill(null),borderWidth:2,pointRadius:0,tension:.35,fill:true});
+    const baseOpts=(yl)=>({responsive:true,maintainAspectRatio:false,animation:false,
+      plugins:{legend:{labels:{color:'#6e7681',boxWidth:10,font:{size:11}}}},
+      scales:{x:{ticks:{color:'#484f58',maxTicksLimit:8,font:{size:10}},grid:{color:'#21262d'}},
+              y:{ticks:{color:'#484f58',font:{size:10}},grid:{color:'#21262d'},
+                 title:{display:true,text:yl,color:'#6e7681',font:{size:10}}}}});
+    const iopsChart=new Chart(document.getElementById('cIops'),{type:'line',data:{labels:[...TS],datasets:[mk('Read IOPS','#58a6ff'),mk('Write IOPS','#3fb950')]},options:baseOpts('IOPS')});
+    const bwChart  =new Chart(document.getElementById('cBw'),  {type:'line',data:{labels:[...TS],datasets:[mk('Read MB/s','#58a6ff'),mk('Write MB/s','#3fb950')]},options:baseOpts('MB/s')});
+    const latChart =new Chart(document.getElementById('cLat'), {type:'line',data:{labels:[...TS],datasets:[mk('Read Lat ms','#f78166'),mk('Write Lat ms','#e3b341')]},options:baseOpts('ms')});
+    function push(ch,...vals){
+      const ts=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      vals.forEach((v,i)=>{ch.data.datasets[i].data.push(v);if(ch.data.datasets[i].data.length>N)ch.data.datasets[i].data.shift()});
+      ch.data.labels.push(ts);if(ch.data.labels.length>N)ch.data.labels.shift();
+      ch.update('none');
+    }
+    function toggleBurst(){document.getElementById('burstBox').classList.toggle('hidden',document.getElementById('pattern').value!=='burst')}
+    function fmt(n){return typeof n==='number'?n.toFixed(1):'0.0'}
+    async function startIO(){
+      const p={block_size:document.getElementById('blockSize').value,
+               read_pct:+document.getElementById('rwSlider').value,
+               pattern:document.getElementById('pattern').value,
+               burst_on:+document.getElementById('burstOn').value,
+               burst_off:+document.getElementById('burstOff').value};
+      await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+      document.getElementById('dot').classList.remove('idle');
+      document.getElementById('bStorage').textContent=document.getElementById('storageType').value.toUpperCase();
+      document.getElementById('bPattern').textContent=p.pattern;
+      document.getElementById('bBS').textContent=p.block_size;
+      document.getElementById('bRW').textContent='R:'+p.read_pct+'% W:'+(100-p.read_pct)+'%';
+    }
+    async function stopIO(){
+      await fetch('/api/stop',{method:'POST'});
+      document.getElementById('dot').classList.add('idle');
+    }
+    async function refresh(){
+      let res;
+      try{res=await fetch('/api/metrics');if(!res.ok)return;}catch{return}
+      const data=await res.json();
+      const pods=Object.values(data);
+      let ri=0,wi=0,rb=0,wb=0,rl=0,wl=0,cnt=0;
+      pods.forEach(p=>{
+        const m=p.metrics||{};
+        ri+=m.read_iops||0; wi+=m.write_iops||0;
+        rb+=m.read_bw_mb||0; wb+=m.write_bw_mb||0;
+        rl+=m.read_lat_ms||0; wl+=m.write_lat_ms||0; cnt++;
+      });
+      if(cnt){rl/=cnt;wl/=cnt}
+      push(iopsChart,ri,wi);push(bwChart,rb,wb);push(latChart,rl,wl);
+      const area=document.getElementById('podsArea');
+      area.innerHTML='';
+      pods.forEach(p=>{
+        const m=p.metrics||{};
+        const running=p.running;
+        const d=document.createElement('div');
+        d.className='pod-card';
+        d.innerHTML=
+          '<div class="pod-header">'+
+          '<div class="dot '+(running?'':'idle')+'"></div>'+
+          '<span class="pod-name">'+(p.pod||'?')+'</span>'+
+          '<span class="badge '+(running?'green':'red')+'">'+(running?'ativo':'parado')+'</span>'+
+          '</div>'+
+          '<div class="pod-row"><span>Read IOPS</span><span>'+fmt(m.read_iops)+'</span></div>'+
+          '<div class="pod-row"><span>Write IOPS</span><span>'+fmt(m.write_iops)+'</span></div>'+
+          '<div class="pod-row"><span>Read BW</span><span>'+fmt(m.read_bw_mb)+' MB/s</span></div>'+
+          '<div class="pod-row"><span>Write BW</span><span>'+fmt(m.write_bw_mb)+' MB/s</span></div>'+
+          '<div class="pod-row"><span>Read Lat</span><span>'+fmt(m.read_lat_ms)+' ms</span></div>'+
+          '<div class="pod-row"><span>Write Lat</span><span>'+fmt(m.write_lat_ms)+' ms</span></div>'+
+          (p.error?'<div class="pod-err">'+p.error+'</div>':'')+
+          '</div>';
+        area.appendChild(d);
+      });
+    }
+    setInterval(refresh,1000);
+    refresh();
+    </script>
+    </body>
+    </html>
+    """
+
+    @app.route("/")
+    def index():
+        return DASHBOARD_HTML
+
+    @app.route("/api/metrics")
+    def api_metrics():
+        with _lock:
+            return jsonify(dict(_store))
+
+    @app.route("/api/start", methods=["POST"])
+    def api_start():
+        d = request.get_json(force=True, silent=True) or {}
+        results = {}
+        for ep in pod_endpoints():
+            try:
+                req = urllib.request.Request(
+                    f"{ep}/start", data=json.dumps(d).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    results[ep] = json.loads(r.read())
+            except Exception as e:
+                results[ep] = {"error": str(e)}
+        return jsonify(results)
+
+    @app.route("/api/stop", methods=["POST"])
+    def api_stop():
+        results = {}
+        for ep in pod_endpoints():
+            try:
+                req = urllib.request.Request(
+                    f"{ep}/stop", data=b"{}",
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    results[ep] = json.loads(r.read())
+            except Exception as e:
+                results[ep] = {"error": str(e)}
+        return jsonify(results)
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok"})
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=3000, threaded=True)
