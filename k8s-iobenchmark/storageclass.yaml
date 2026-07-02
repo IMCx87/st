@@ -1,0 +1,58 @@
+# ==============================================================
+# STORAGECLASSES — cluster-scoped (sem namespace)
+# ==============================================================
+# Escolha UMA opção editando statefulset.yaml > volumeClaimTemplates
+# > storageClassName: nfs-storage  (padrão)
+# > storageClassName: iscsi-storage
+# ==============================================================
+
+---
+# OPÇÃO ATIVA: NFS
+# Requer: csi-driver-nfs instalado no cluster
+# https://github.com/kubernetes-csi/csi-driver-nfs
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-storage
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+  annotations:
+    io-benchmark/type: nfs
+provisioner: nfs.csi.k8s.io
+parameters:
+  server: "192.168.1.100"        # <- EDITE: IP do servidor NFS
+  share: "/exports/io-benchmark"  # <- EDITE: path exportado
+  mountPermissions: "0777"
+reclaimPolicy: Delete            # PVCs são deletados junto com o PV
+volumeBindingMode: Immediate     # provisiona imediatamente ao criar o PVC
+allowVolumeExpansion: true
+mountOptions:
+  - nfsvers=4.1
+  - hard          # I/O blocks em vez de retornar erro em falha de rede
+  - timeo=600     # timeout de 60s para operações NFS
+  - retrans=5     # 5 retransmissões antes de reportar erro
+
+---
+# OPÇÃO ALTERNATIVA: iSCSI (descomente tudo abaixo para usar)
+# Requer: democratic-csi ou csi-driver-iscsi instalado
+# https://github.com/democratic-csi/democratic-csi
+#
+# apiVersion: storage.k8s.io/v1
+# kind: StorageClass
+# metadata:
+#   name: iscsi-storage
+#   labels:
+#     app: iobenchmark
+#     managed-by: claude-code
+#   annotations:
+#     io-benchmark/type: iscsi
+# provisioner: org.democratic-csi.iscsi   # <- ajuste ao seu driver
+# parameters:
+#   targetPortal: "192.168.1.100:3260"    # <- EDITE
+#   iqn: "iqn.2024-01.com.example:storage" # <- EDITE
+#   lun: "0"
+#   fsType: ext4
+# reclaimPolicy: Delete
+# volumeBindingMode: WaitForFirstConsumer  # provisiona apenas quando o pod for agendado
+# allowVolumeExpansion: true

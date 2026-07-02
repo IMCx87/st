@@ -1,0 +1,93 @@
+# ==============================================================
+# DEPLOYMENT — io-dashboard
+# ==============================================================
+# Dashboard web em tempo real que agrega métricas dos 3 pods
+# io-generator via DNS do StatefulSet headless.
+# ==============================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: io-dashboard
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-dashboard
+spec:
+  replicas: 3   # HPA gerencia entre 3 e 5 com base em CPU (hpa.yaml)
+  selector:
+    matchLabels:
+      app: io-dashboard
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1   # garante que pelo menos 2 réplicas ficam up durante update
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: io-dashboard
+        app.kubernetes.io/component: dashboard
+        app.kubernetes.io/part-of: io-benchmark
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: io-dashboard
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent   # tag específica → não força pull a cada start
+          command: ["/bin/sh", "-c"]
+          args:
+            - pip install flask --quiet --no-cache-dir && python /app/app.py
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # Namespace injetado via Downward API — sem hardcode
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Quantos pods io-generator existem (deve coincidir com StatefulSet replicas)
+            - name: NUM_PODS
+              value: "3"
+            # Nome do headless service do StatefulSet
+            - name: IO_SERVICE
+              value: "io-generator-headless"
+            # Nome do StatefulSet (usado para montar o DNS por pod)
+            - name: IO_STS
+              value: "io-generator"
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30   # aguarda pip install + startup do Flask
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            # Reinicia o pod se o Flask travar — ausente no original, adicionado aqui
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 60   # mais que readiness para evitar restart prematuro
+            periodSeconds: 30
+            failureThreshold: 5       # 5 falhas consecutivas = 2.5 min antes de reiniciar
+            timeoutSeconds: 5
+      volumes:
+        - name: app-code
+          configMap:
+            name: io-dashboard-app
+            defaultMode: 0444   # somente leitura

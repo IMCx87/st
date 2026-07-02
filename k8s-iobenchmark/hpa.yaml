@@ -1,0 +1,44 @@
+# ==============================================================
+# HorizontalPodAutoscaler — io-dashboard
+# ==============================================================
+# Escala o dashboard entre 3 e 5 réplicas com base em CPU.
+# O StatefulSet io-generator é fixo em 3 (não tem HPA —
+# a anti-affinity obrigatória já limita a 1 pod por nó).
+# ==============================================================
+---
+apiVersion: autoscaling/v2   # estável desde k8s 1.23
+kind: HorizontalPodAutoscaler
+metadata:
+  name: io-dashboard
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: io-dashboard
+  minReplicas: 3    # alinhado com o valor de replicas no deployment.yaml
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # escala quando CPU média > 70%
+  behavior:
+    scaleDown:
+      # Aguarda 3 minutos antes de reduzir — evita flapping em workloads de benchmark
+      stabilizationWindowSeconds: 180
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
