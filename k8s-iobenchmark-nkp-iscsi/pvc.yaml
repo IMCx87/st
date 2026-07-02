@@ -1,0 +1,38 @@
+# ==============================================================
+# PVC — io-generator (Nutanix Kubernetes Platform — iSCSI)
+# ==============================================================
+# Os PVCs de produção são criados AUTOMATICAMENTE pelo StatefulSet
+# via volumeClaimTemplates (statefulset.yaml). Não é necessário
+# aplicar este arquivo para o funcionamento normal.
+#
+# Nomes gerados pelo StatefulSet:
+#   io-data-io-generator-0  →  worker-1
+#   io-data-io-generator-1  →  worker-2
+#   io-data-io-generator-2  →  worker-3
+#
+# Este arquivo contém PVCs standalone para:
+#   - Pré-provisionar storage antes do StatefulSet
+#   - Testes manuais isolados de um único pod
+#   - Recriar PVCs após remoção acidental
+#
+# ATENÇÃO: aplique APENAS se não usar o StatefulSet para provisionar.
+# ==============================================================
+
+# --- PVC standalone para io-generator-0 (pré-provisionamento) ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: io-data-io-generator-0
+#   namespace: io-benchmark
+#   labels:
+#     app: iobenchmark
+#     managed-by: claude-code
+#     component: io-generator
+# spec:
+#   accessModes: ["ReadWriteOnce"]
+#   storageClassName: nutanix-volumes   # deve coincidir com o StatefulSet
+#   resources:
+#     requests:
+#       storage: 50Gi
+#
+# --- Repita para io-data-io-generator-1 e io-data-io-generator-2 ---

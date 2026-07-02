@@ -1,0 +1,56 @@
+# ==============================================================
+# SERVICES — Nutanix Kubernetes Platform (NKP) — iSCSI
+# ==============================================================
+
+---
+# Headless Service — io-generator
+# Necessário para o StatefulSet expor DNS estável por pod:
+# io-generator-{0,1,2}.io-generator-headless.io-benchmark.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: io-generator-headless
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-generator
+spec:
+  clusterIP: None    # headless: sem VIP, DNS resolve direto para os IPs dos pods
+  publishNotReadyAddresses: false   # só expõe pods que passaram no readiness
+  selector:
+    app: io-generator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+
+---
+# Service — io-dashboard (NodePort)
+# Acesso: http://<node-ip>:<nodePort>
+#
+# NKP normalmente já inclui um LoadBalancer (MetalLB) ou Ingress
+# (Traefik) via Kommander. Se o seu cluster tiver LoadBalancer
+# disponível, troque type: para LoadBalancer para obter um IP externo
+# em vez de usar NodePort.
+apiVersion: v1
+kind: Service
+metadata:
+  name: io-dashboard
+  namespace: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    component: io-dashboard
+spec:
+  type: NodePort
+  # type: LoadBalancer   # descomente se o cluster NKP tiver MetalLB/LB configurado
+  selector:
+    app: io-dashboard
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+      # nodePort: 30300   # descomente para fixar a porta (30000-32767)
