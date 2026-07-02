@@ -1,0 +1,13 @@
+# ==============================================================
+# NAMESPACE
+# ==============================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: io-benchmark
+  labels:
+    app: iobenchmark
+    managed-by: claude-code
+    app.kubernetes.io/part-of: io-benchmark
+    app.kubernetes.io/managed-by: claude-code
